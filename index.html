@@ -1,0 +1,547 @@
+<!DOCTYPE html>
+<head>
+  <meta charset="utf-8">
+  <link rel="stylesheet" href="//www.blockspring.com/graph_templates/api_v1/boilerplate.css">
+  <script src="https://code.jquery.com/jquery-2.1.1.min.js" type="text/javascript"></script>
+  <script src="//www.blockspring.com/graph_templates/api_v1/boilerplate.js"></script>
+  <style>
+  html, body {
+    font: 12px sans-serif;
+    width: 100%;
+    height: 100%;
+    margin: 0;
+    padding: 0;
+  }
+
+  strong {
+    font-weight: bold;
+  }
+
+  .axis path {
+    fill: none;
+    stroke: none;
+  }
+
+  .axis line {
+    fill: none;
+    stroke: #ddd;
+  }
+
+  .axis .tick text {
+    fill: #666;
+  }
+
+  .label {
+    font-size: 1em;
+    font-weight: bold;
+  }
+
+  .layer, rect {
+    -webkit-transition: opacity 0.15s ease-out;  /* Android 2.1+, Chrome 1-25, iOS 3.2-6.1, Safari 3.2-6  */
+            transition: opacity 0.15s ease-out;  /* Chrome 26, Firefox 16+, iOS 7+, IE 10+, Opera, Safari 6.1+  */
+  }
+
+  form {
+    position: absolute;
+    right: 10px;
+    top: 4px;
+  }
+
+  #legend {
+    position: absolute;
+    z-index: 8;
+    right: 0;
+    top: 0;
+    overflow-y: scroll;
+    overflow-x: hidden;
+  }
+
+  #tooltip {
+    opacity: 0;
+    position: absolute;
+    z-index: 2;
+    top: 0;
+    left: 0;
+    border-radius: 3px;
+    border: 1px solid #d0d0d0;
+    padding: 12px;
+    background: #f9f9f9;
+    background: rgba(255,255,255,0.9);
+    pointer-events: none;
+    overflow-x: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  #dropdowns {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 50px;
+    z-index: 5;
+  }
+
+  .hidden {
+    display: none;
+  }
+  </style>
+</head>
+<body>
+  <div id="dropdowns"></div>
+  <div id="tooltip"></div>
+  <div id="legend"></div>
+
+  <!-- If this is mobile, hide the stack-controls. -->
+  <form id="stack-controls">
+    <label><input type="radio" name="mode" value="grouped"> Grouped</label>
+    <label><input type="radio" name="mode" value="stacked" checked> Stacked</label>
+  </form>
+</body>
+
+<script>
+var graph = {
+  draw: function(margin) {
+    d3.selectAll("svg").remove();
+
+    d3.select("body")
+      .style("font-family", Block.vars["font-family"])
+      .style("font-size", Block.vars["font-size"]);
+
+    var bucket = Block.vars.csv.columnRoleMap["X Variable"][0],
+        measure = Block.vars.csv.columnRoleMap["Y Variable"][0],
+        grouping = Block.vars.csv.columnRoleMap.grouping[0],
+        stacked = true;
+
+    var flipped = Block.vars.horizontal;
+
+    if (!flipped) {
+      var xdim = "x",
+          ydim = "y",
+          heightdim = "height",
+          widthdim = "width";
+    } else {
+      var xdim = "y",
+          ydim = "x",
+          heightdim = "width",
+          widthdim = "height";
+    }
+
+    var raw  = Block.vars.csv.data;
+
+      raw.forEach(function(d) {
+        d[measure] = +d[measure];
+      });
+
+      // number of data points
+      var buckets = d3.set(raw.map(function(d) { return d[bucket]; })).values();
+
+      if (Block.vars.bucket_sort == "ascending") buckets.sort(function(a,b) { return b-a; });
+      if (Block.vars.bucket_sort == "descending") buckets.sort(function(a,b) { return a-b; });
+      if (Block.vars.bucket_sort == "alphabetical") buckets.sort();
+
+      var groups = d3.set(grouping ? raw.map(function(d) { return d[grouping]; }) : ["Series"]).values();
+
+      d3.select("#stack-controls").style("display", groups.length == 1 ? "none" : null);
+
+      var data = groups.map(function(group) {
+        var lookup = {};
+        raw
+          .filter(function(d) { return grouping
+            ? d[grouping] == group
+            : true; })
+          .forEach(function(d) { lookup[d[bucket]] = d; })
+        return buckets.map(function(b) {
+          if (b in lookup) {
+           return lookup[b]
+          } else {
+            var obj = {};
+            obj[bucket] = b;
+            obj[measure] = 0; // is this reasonable behavior?
+            if (grouping) obj[grouping] = group;
+            return obj;
+          }
+        });
+      });
+
+      /*
+      var data = d3.nest()
+        .key(function(d) { return grouping ? d[grouping] : "All"; })
+        .entries(raw)
+        .map(function(group) { return group.values; });
+        */
+
+      // number of groups
+      var n = data.length;
+
+      var stack = d3.layout.stack()
+            .x(function(d) { return d[bucket]; })
+            .y(function(d) { return d[measure]; }),
+          layers = stack(data),
+          yGroupMax = d3.max(layers, function(layer) { return d3.max(layer, function(d) { return d.y; }); }),
+          yStackMax = d3.max(layers, function(layer) { return d3.max(layer, function(d) { return d.y0 + d.y; }); });
+          yGroupMin = d3.min(layers, function(layer) { return d3.min(layer, function(d) { return d.y; }); }),
+          yStackMin = d3.min(layers, function(layer) { return d3.min(layer, function(d) { return d.y0; }); });
+
+      var margin = margin || {top: 40, right: 100, bottom: 24, left: 60};
+      if (Block.vars.csv.columnRoleMap.grafly_dropdowns.length != 0) {
+        margin.top = 90;
+      }
+      if (Block.vars.hide_legend) {
+        margin.right = 24;
+      }
+      if (flipped) {
+        margin.bottom = 12;
+        if (Block.vars.y_axis_hide) {
+          margin.bottom = 24;
+        }
+        if (Block.vars.x_axis_hide) {
+          margin.left = 24;
+        }
+      } else {
+        if (Block.vars.x_axis_hide) {
+          margin.bottom = 24;
+        }
+        if (Block.vars.y_axis_hide) {
+          margin.left = 24;
+        }
+      }
+      if (Block.vars.margin_top) margin.top = Block.vars.margin_top;
+      if (Block.vars.margin_right) margin.right = Block.vars.margin_right;
+      if (Block.vars.margin_bottom) margin.bottom = Block.vars.margin_bottom;
+      if (Block.vars.margin_left) margin.left = Block.vars.margin_left;
+
+
+
+      var width = document.body.clientWidth - margin.left - margin.right,
+          height = document.body.clientHeight - margin.top - margin.bottom - 4; // 4 seems necessary to hide scrollbars
+
+      var x = d3.scale.ordinal()
+          .domain(buckets)
+          .rangeRoundBands(flipped
+            ? [0, height]
+            : [0, width]
+          , .05);
+
+      var y = d3.scale.linear()
+          .domain([
+                  Block.vars.y_axis_min != null ? Block.vars.y_axis_min  : Math.min(0,yStackMin),
+                  Block.vars.y_axis_max != null ? Block.vars.y_axis_max  : yStackMax
+                ])
+          .range(flipped
+            ? [0, width]
+            : [height, 0]);
+
+      var color = d3.scale.ordinal().range(Block.vars.colors);
+
+      var yAxis = d3.svg.axis()
+          .scale(y)
+          .orient(flipped ? "top" : "left")
+          .tickSize(flipped ? -height : -width)
+          .tickFormat(d3.format(Block.vars.y_axis_format_number))
+          .ticks(Block.vars.y_ticks ? Block.vars.y_ticks : Math.max(2,Math.round(height/70)));
+
+      var xAxis = d3.svg.axis()
+          .scale(x)
+          .tickSize(0)
+          .tickPadding(6)
+          .orient(flipped ? "left" : "bottom")
+          .tickFormat(function(d) {
+            return Block.vars.csv.columnMetaData[bucket].formatLibrary[d];
+          });
+
+      var svg = d3.select("body").append("svg")
+          .attr("width", width + margin.left + margin.right)
+          .attr("height", height + margin.top + margin.bottom)
+        .append("g")
+          .attr("transform", "translate(" + margin.left + "," + margin.top + ")");
+
+      svg.append("g")
+          .attr("class", "y axis")
+          .call(yAxis)
+        .append("text")
+          .attr("class", "label")
+          .attr("y", -18)
+          .attr("x", flipped ? 0 : -margin.left+12)
+          .style("text-anchor", "start")
+          .text(measure);
+
+      d3.selectAll(".y.axis .tick text")
+          .style("text-anchor", flipped ? "start" : "end")
+          .style("display", Block.vars.y_axis_hide ? "none" : null);
+
+      svg.append("g")
+          .attr("class", "x axis")
+          .attr("transform", flipped
+            ? "translate(0,0)"
+            : "translate(0," + height + ")")
+          .call(xAxis);
+
+      d3.selectAll(".x .tick text")
+        .style("display", Block.vars.x_axis_hide ? "none" : null)
+        .filter(function(d,i) {
+          var n = x.domain().length;
+          var goal = Block.vars.x_ticks ? Block.vars.x_ticks : n;
+          return i % Math.ceil(n/goal) != 0;
+        })
+        .remove();
+
+      if (!Block.vars.margin_left) {
+        if (!flipped) {
+          if (!Block.vars.y_axis_hide && d3.select(".y.axis").node().getBBox().x < -margin.left) {
+            margin.left = -d3.select(".y.axis").node().getBBox().x + 6;
+            graph.draw(margin);
+            return;
+          }
+        } else {
+          if (!Block.vars.x_axis_hide && d3.select(".x.axis").node().getBBox().x < -margin.left) {
+            margin.left = -d3.select(".x.axis").node().getBBox().x + 6;
+            graph.draw(margin);
+            return;
+          }
+        }
+      }
+
+      if (Block.vars.hide_grid) {
+        svg.selectAll(".axis path").style("display", "none");
+        svg.selectAll(".axis line").style("display", "none");
+      }
+
+      svg.append("rect")
+         .attr("x", -margin.left)
+         .attr("y", -margin.top)
+         .attr("width", width + margin.left + margin.right)
+         .attr("height", height + margin.top + margin.bottom)
+         .style("fill", "transparent")
+         .on("touchstart", deactivate)
+
+      var layer = svg.selectAll(".layer")
+          .data(layers)
+        .enter().append("g")
+          .attr("class", "layer")
+          .style("fill", function(d, i) { return color(grouping ? d[0][grouping] : "Series"); });
+
+      var rect = layer.selectAll("rect")
+          .data(function(d) { return d; })
+        .enter().append("rect")
+          .attr(xdim, function(d) { return x(d[bucket]); })
+          .attr(widthdim, x.rangeBand() > 1 ? x.rangeBand() : 1)
+          .attr(ydim, function(d) {
+            return flipped
+              ? y(d.y0)
+              : y(d.y0 + d.y);
+          })
+          .attr(heightdim, function(d) {
+            return flipped
+              ? -y(d.y0) + y(d.y0 + d.y)
+              : y(d.y0) - y(d.y0 + d.y);
+            })
+          .on("touchstart", activate)
+          .on("mousemove", activate)
+          .on("mouseout", deactivate);
+
+        function deactivate(d,i,g) {
+          d3.selectAll(".layer rect")
+            .style("opacity", 1);
+          d3.selectAll(".legend").style("opacity", 1);
+          d3.select("#tooltip")
+            .style("opacity", 0);
+        }
+
+        function activate(d,i,g) {
+            d3.selectAll(".layer rect")
+              .style("opacity", 0.2);
+            d3.select(this)
+              .style("opacity", 1);
+            d3.selectAll(".legend").style("opacity", 0.2)
+              .filter(function(p) {
+                return grouping
+                  ? p == d[grouping]
+                  : true;
+              })
+              .style("opacity", 1);
+
+            var text = "";
+            if (Block.vars.csv.columnRoleMap.tooltips &&
+                Block.vars.csv.columnRoleMap.tooltips.length > 0) {
+              Block.vars.csv.columnRoleMap.tooltips.forEach(function(k) {
+                text += "<strong>" + k + "</strong>" + " <br/><span>" + d[k] + "</span><br/><br/>";
+              });
+            } else {
+              for (var k in d) {
+                if (k == "graflyID") continue;
+                if (k == "count") continue;
+                if (k == "y") continue;
+                if (k == "y0") continue;
+                text += "<strong>" + k + "</strong>" + " <br/><span>" + d[k] + "</span><br/><br/>";
+              }
+            }
+
+            d3.select("#tooltip")
+              .html(text);
+
+            var ttWidth = parseInt(d3.select("#tooltip").style("width").replace("px", ""));
+            var ttHeight = parseInt(d3.select("#tooltip").style("height").replace("px", ""));
+            var xy = stacked
+              ? (flipped
+                  ? [y(d.y0) - (y(d.y0) - y(d.y0 + d.y))/2, x(d[bucket])]
+                  : [x(d[bucket]), y(d.y0) - (y(d.y0) - y(d.y0 + d.y))/2])
+              : (flipped
+                  ? [y(d.y)/2, x(d[bucket])-x.rangeBand()*(n-g)/n+x.rangeBand()/n]
+                  : [x(d[bucket])+x.rangeBand()*g/n, height-d.y]);
+
+
+            var max_tooltip_width =  $(window).width() < 700 ? width : width / 2;
+
+            d3.select("#tooltip")
+              .style("max-width", max_tooltip_width + "px")
+              .style("top", xy[1] + "px")
+              .style("left", xy[0] + "px")
+              .style("margin-top", (
+                flipped
+                ? (xy[1] > height*0.5 ? -ttHeight + (stacked ? x.rangeBand()/2 : margin.top+x.rangeBand()/n) : margin.top+x.rangeBand()+8)
+                : 0
+              ) + "px")
+              .style("margin-left", (
+                flipped
+                ? 0
+                : (xy[0] > width*0.5 ? -ttWidth+x.rangeBand()/2 : margin.left + (stacked ? x.rangeBand()+8 : x.rangeBand()/n + 8))
+              ) + "px")
+              .style("opacity", 1);
+
+          }
+
+      d3.selectAll("input").on("change", change);
+
+      if (!Block.vars.hide_legend) {
+        var legendItems = color.domain();
+
+        if (Block.vars.sort_legend_alpha) legendItems.sort();
+
+        var legend = d3.select("#legend")
+          .style("margin-top", margin.top + "px")
+          .style("height", height + "px")
+          .style("width", margin.right + "px")
+          .append("svg")
+            .attr("height", (legendItems.length+1)*16)
+            .attr("width", margin.right)
+          .selectAll(".legend")
+            .data(legendItems)
+          .enter().append("g")
+            .attr("class", "legend")
+            .attr("transform", function(d, i) { return "translate(0," + i * 16 + ")"; })
+
+
+        legend.append("rect")
+          .attr("x", 20)
+          .attr("y", 3)
+          .attr("width", 8)
+          .attr("height", 8)
+          .style("fill", color);
+
+        legend.append("text")
+            .attr("x", 32)
+            .attr("y", 8)
+            .attr("dy", ".35em")
+            .style("text-anchor", "start")
+            .text(function(d) { return d; })
+
+        legend.append("rect")
+            .style("fill", "transparent")
+            .attr("x", 0)
+            .attr("y", 0)
+            .attr("width", margin.right)
+            .attr("height", 16)
+            .on("touchstart", activateLegend)
+            .on("mouseover", activateLegend)
+            .on("mouseout", function() {
+              d3.selectAll(".layer").style("opacity", 1)
+              d3.selectAll(".legend").style("opacity", 1)
+            });
+
+        function activateLegend(d) {
+          d3.selectAll(".layer").style("opacity", 0.2)
+            .classed("active", false)
+            .filter(function(p) {
+              return grouping
+                ? d == p[0][grouping]
+                : true;
+            })
+            .style("opacity", 1);
+          d3.selectAll(".legend").style("opacity", 0.2)
+            .filter(function(p) {
+              return p == d;
+            })
+            .style("opacity", 1);
+        }
+      }
+
+      function change() {
+        if (this.value === "grouped") {
+          stacked = false;
+          transitionGrouped();
+        } else {
+          stacked = true;
+          transitionStacked();
+        }
+      }
+
+      function transitionGrouped() {
+        rect.transition()
+            .duration(500)
+            .delay(function(d, i) { return i * 10; })
+            .attr(xdim, function(d, i, j) { return x(d[bucket]) + x.rangeBand() / n * j; })
+            .attr(widthdim, x.rangeBand() / n)
+          .transition()
+          .attr(ydim, function(d) {
+            return flipped
+              ? y(0)
+              : y(d.y);
+          })
+          .attr(heightdim, function(d) {
+            return flipped
+              ? y(d.y)
+              : height - y(d.y);
+          });
+      }
+
+      function transitionStacked() {
+        rect.transition()
+            .duration(500)
+            .delay(function(d, i) { return i * 10; })
+            .attr(ydim, function(d) {
+              return flipped
+                ? y(d.y0)
+                : y(d.y0 + d.y);
+            })
+            .attr(heightdim, function(d) {
+              return flipped
+                ? -y(d.y0) + y(d.y0 + d.y)
+                : y(d.y0) - y(d.y0 + d.y);
+              })
+          .transition()
+          .attr(xdim, function(d) { return x(d[bucket]); })
+          .attr(widthdim, x.rangeBand() > 1 ? x.rangeBand() : 1)
+          .attr(ydim, function(d) {
+            return flipped
+              ? y(d.y0)
+              : y(d.y0 + d.y);
+          })
+          .attr(heightdim, function(d) {
+            return flipped
+              ? -y(d.y0) + y(d.y0 + d.y)
+              : y(d.y0) - y(d.y0 + d.y);
+            })
+      }
+
+  }
+};
+
+Block.ready(graph.draw);
+
+$(document).ready(function(){
+  if ($(window).width() <= 700) {
+    $('#stack-controls').addClass('hidden');
+  }
+});
+
+</script>
